@@ -1,0 +1,103 @@
+create table object_info_tbl (
+	id_object 		int not null, 
+	id_territory 	int not null,
+	dom 			char(6),
+	kw 				char(4),
+	id_object_class int not null,
+	id_object_type  int not null,
+	is_private 		int not null,
+	sq_all 			int,
+	object_no 		int not null,
+	trace_info 		varchar,
+	access_codes 	varchar,
+	is_drop 		int,
+	note 			text
+)
+
+===========
+
+create table object (
+	id_object 		int not null, 
+	id_territory 	int not null,
+	dom 			char(6),
+	kw 				char(4),
+	id_object_class int not null,
+	id_object_type  int not null,
+	is_private 		int,
+	sq_all 			numeric,
+	object_no 		int,
+	trace_info 		varchar,
+	access_codes 	varchar,
+	is_drop 		int,
+	note 			text
+)
+
+===========
+
+create table territory (
+	id_territory 	   int not null,
+	name 			   varchar,
+	telecode 	       int,
+	id_nerritory_class int not null,
+	id_parent		   int,
+	is_territory_type  int,
+	id_settlement 	   int,
+	id_agent		   int,
+	id_timezone 	   int, 
+	oktmo_code		   int, 
+	zip_type		   int, 
+	id_weather_station int, 
+	full_name		   varchar
+)
+
+===========
+
+INSERT INTO territory (
+id_territory, name, id_territory_class,  id_parent, id_territory_type, id_settlement, zip_type
+)
+VALUES 
+(13729, 'Пионерская', 	  8, 13059, 29, 1, 0),
+(13746, 'Южный Переулок', 8, 13059, 29, 1, 0),
+(13748, '6 Микрорайон',   8, 13059, 29, 1, 0),
+(13756, 'Гайдара',		  8, 13059, 29, 1, 1),
+(13826, 'Лесная',		  8, 13396, 29, 1, 0),
+(13834, 'Советская',	  8, 13393, 29, 1, 0),
+(13844, 'Спортивная',	  8, 13395, 29, 1, 0),
+(13851, 'Новая',		  8, 13772, 29, 1, 0),
+(13856, 'Октябрьская',	  8, 13387, 29, 1, 0),
+(13868, 'Коммунальная',   8, 13387, 29, 1, 0),
+(13883, 'Набережная',	  8, 13396, 29, 1, 0),
+(13059, 'Сосногорск',	  4, 13771, 11, 1, 2),
+(13396, 'п.Вис',		  4, 13771, 14, 1, 0),
+(13393, 'п.Малая Пера',	  4, 13771, 14, 1, 0),
+(13395, 'п.Поляна',		  4, 13771, 14, 1, 0),
+(13772, 'с.Усть-Ухта',	  4, 13771, 24, 1, 0),
+(13387, 'п.Керки',		  4, 13771, 14, 1, 0),
+(13771, 'Сосногорский',   7, 	 3, 41, 1, 0), 
+(3, 	'Коми',			  3,	 2, 48, 1, 0),
+(2,		'Россия',	  	  2,  null,  2, 1, 0)
+
+==========
+
+CREATE OR REPLACE VIEW OBJECT_INFO AS 
+	SELECT * 
+	FROM OBJECT
+
+===========
+
+INSERT INTO object (
+id_object, id_territory, dom, id_object_class,  kw, id_object_type, is_private, sq_all, is_drop)
+VALUES 
+(85409, 	13746,	'22',		1,	  NULL, 6,	0,	0,		0),
+(85410,		13756,	'9',		1,	  NULL, 6,	0,	3360.2,	0),
+(85411,		13748,	'22',		1,	  NULL, 6,	0,	5969.4, 0),
+(85361,		13729,	'6',		1,	  NULL, 6,	0,	456.1,	0),
+(109614,	13748,	'18/1',		2,	  '1б',	7,	0,	32.5,	0),
+(111844,	13868,	'10',		2,	  '2',	7,	0,	41.92,	0),
+(111849,	13856,	'12',		2,	  '2',	7,	0,	39,		0),
+(111850,	13856,	'23',		2,	  '2',	7,	0,	62.9,	0),
+(111851,	13851,	'13',		2,	  '2',	7,	0,	68,		0),
+(110639,	13883,	'1',		2,	  '7',	7,	0,	43.5,	0),
+(110644,	13826,	'18',		2,	  '8',	7,	0,	37.6,	0),		
+(110656,	13834,	'16',		2,	  '8',	7,	0,	38,		0),
+(110667,	13844,	'9',		2,	  '8',	7,	0,	38.6,	0)	
