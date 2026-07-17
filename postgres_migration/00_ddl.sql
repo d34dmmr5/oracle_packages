@@ -1,169 +1,174 @@
--- =============================================================================================
--- 00_ddl.sql
--- Схемы, таблицы и типы для PostgreSQL 16-версии BA7_DATA.
+-- ============================================================
+-- 00_ddl.sql — DDL базы данных (MERGE-версия: лучшее из двух вариантов)
+-- PostgreSQL 16 | Проверено на живой базе (тесты T1–T16)
 --
--- Схема ba7_data          — сами данные (аналог Oracle-схемы BA7_DATA).
--- Схема territory_pkg     — функции-заменители пакета territory_pkg (сборка адреса по иерархии).
--- Схема object_info_pkg   — функции-заменители пакета object_info_pkg (синхронизация object_info_tbl)
---                            + составной тип object_row_type.
+-- Порядок выполнения комплекта:
+--   00_ddl.sql             ← этот файл (ПЕРВЫМ)
+--   01_territory_pkg.sql
+--   02_object_info_pkg.sql
+--   03_triggers.sql
+--   04_test_data.sql       (тестовые данные, идемпотентен)
+--   05_tests.sql           (поведенческие тесты T1–T16)
 --
--- Отдельная схема на "пакет" — это способ сымитировать инкапсуляцию Oracle-пакетов в PostgreSQL:
--- у PostgreSQL нет PACKAGE BODY, где тело функций скрыто от пользователя схемы с данными, поэтому
--- функции/процедуры выносятся в отдельные схемы, а на схему с данными (ba7_data) правами
--- ограничивается прямой доступ к их исходникам (см. TODO про GRANT в конце файла).
--- =============================================================================================
+-- Метки "MERGE-фикс" в коде помечают места, где к базовому варианту
+-- (transition tables) добавлены доработки надёжности — см. README.md.
+--
+-- Содержит:
+--   1. Создание тестовой БД (закомментировано — выполнить отдельно)
+--   2. Схемы object_info_pkg, territory_pkg
+--   3. Составные типы object_row_type, territory_info_type
+--   4. Базовые таблицы (реконструкция по Oracle-архиву)
+--   5. Таблицу object_info_tbl
+--   6. Индексы
+--
+-- Права (GRANT) намеренно отсутствуют.
+-- ============================================================
 
-CREATE SCHEMA IF NOT EXISTS ba7_data;
-CREATE SCHEMA IF NOT EXISTS territory_pkg;
+-- ────────────────────────────────────────────────────────────
+-- 1. Тестовая база данных
+-- CREATE DATABASE нельзя выполнять внутри транзакции —
+-- выполните эти две команды отдельно, до запуска этого файла:
+--
+--   CREATE DATABASE object_info_test ENCODING 'UTF8';
+--   \c object_info_test
+-- ────────────────────────────────────────────────────────────
+
+
+-- ────────────────────────────────────────────────────────────
+-- 2. Схемы (аналог Oracle PACKAGE namespace)
+-- ────────────────────────────────────────────────────────────
 CREATE SCHEMA IF NOT EXISTS object_info_pkg;
+CREATE SCHEMA IF NOT EXISTS territory_pkg;
 
--- =============================================================================================
--- Справочник территорий (страна -> регион -> район -> нас.пункт -> внутригородской район -> улица)
--- =============================================================================================
 
-CREATE TABLE ba7_data.territory (
-    id_territory        BIGINT PRIMARY KEY,
-    id_agent            INT,
-    name                VARCHAR(200) NOT NULL,
-    id_parent           BIGINT REFERENCES ba7_data.territory (id_territory),
-    id_territory_class  INT NOT NULL,
-    id_territory_type   INT,
-    id_settlement       INT,
-    zip_type            INT,
-    zip                 NUMERIC(10),
-    full_name           VARCHAR(200)
-);
+-- ────────────────────────────────────────────────────────────
+-- 3. Составные типы
+--
+-- ВАЖНО: прямой CREATE TYPE с квалифицированным именем схемы,
+-- без DO-блока. CREATE TYPE не поддерживает IF NOT EXISTS для
+-- составных типов даже в PG 16, поэтому при повторном запуске
+-- файла на существующей базе эти два стейтмента упадут с
+-- "type already exists" — это ожидаемо и безопасно.
+-- Для полного пересоздания: DROP TYPE ... CASCADE (уронит
+-- зависимые процедуры — их придётся создать заново).
+-- ────────────────────────────────────────────────────────────
 
--- Обход иерархии в territory_pkg.get_info идёт от листа к корню по id_parent -- индекс критичен.
-CREATE INDEX i1_territory_parent ON ba7_data.territory (id_parent);
-
-CREATE TABLE ba7_data.territory_type (
-    id_territory_class INT NOT NULL,
-    id_territory_type  INT NOT NULL,
-    name                VARCHAR(200),
-    short_name          VARCHAR(50),
-    PRIMARY KEY (id_territory_class, id_territory_type)
-);
-
--- =============================================================================================
--- Классификатор объектов
--- =============================================================================================
-
-CREATE TABLE ba7_data.object_type (
-    id_object_class INT NOT NULL,
-    id_object_type  INT NOT NULL,
-    name            VARCHAR(500),
-    PRIMARY KEY (id_object_class, id_object_type)
-);
-
--- =============================================================================================
--- Основная таблица объектов.
--- Подтиповые таблицы (object_house/object_flat/house_doorway/object_room/object_unknown) копируют
--- вниз в OBJECT адресные поля через BEFORE ROW триггеры -- см. 04_subtype_triggers.sql.
--- =============================================================================================
-
-CREATE TABLE ba7_data.object (
-    id_object           BIGINT PRIMARY KEY,
-    id_territory        BIGINT REFERENCES ba7_data.territory (id_territory),
-    dom                 VARCHAR(10),
+-- Аналог Oracle object%ROWTYPE, ограниченный полями из
+-- l$object_required_column_list (object_info_pkg.sql, строки 63-65)
+-- + id_object
+CREATE TYPE object_info_pkg.object_row_type AS (
+    id_object           BIGINT,
+    id_territory        BIGINT,
+    dom                 VARCHAR(10),   -- основной дом: format_object_no(..., 10)
     building_no         VARCHAR(30),
     kw                  VARCHAR(30),
-    id_territory2       BIGINT REFERENCES ba7_data.territory (id_territory),
-    dom2                VARCHAR(6),
-    building_no2        VARCHAR(30),
-    id_object_class     INT NOT NULL,
-    id_object_type      INT NOT NULL,
+    id_territory2       BIGINT,
+    dom2                VARCHAR(6),    -- альтернативный дом: format_object_no(..., 6)
+    building_no2        VARCHAR(30),   -- Oracle: BUILDING_NO2 VARCHAR2(30)
+    id_object_class     INTEGER,
+    id_object_type      INTEGER,
     sq_all              NUMERIC(10,2),
-    sq_life             NUMERIC,
-    volume              NUMERIC,
     object_name         VARCHAR(50),
-    room_no             VARCHAR(30),
     id_entity_instance  BIGINT,
     trace_info          VARCHAR(2000),
-    addressing_mode     INT,
-    -- id_object_house/id_house_doorway намеренно без FK: в Oracle-оригинале это тоже простые NUMBER
-    -- без ALTER TABLE ADD CONSTRAINT, т.к. object_house/house_doorway сами ссылаются на object
-    -- (см. ниже) -- FK в обе стороны дал бы циклическую зависимость.
+    addressing_mode     INTEGER,       -- 1 = по домам, 2 = по подъездам
     id_object_house     BIGINT,
     id_house_doorway    BIGINT,
     zip                 NUMERIC(10),
     object_no           BIGINT,
-    FOREIGN KEY (id_object_class, id_object_type)
-        REFERENCES ba7_data.object_type (id_object_class, id_object_type)
+    volume              NUMERIC,
+    sq_life             NUMERIC,
+    room_no             VARCHAR(30)    -- VARCHAR: format_object_no выравнивает пробелами
 );
 
-CREATE INDEX i1_object_territory  ON ba7_data.object (id_territory);
-CREATE INDEX i1_object_territory2 ON ba7_data.object (id_territory2);
-
--- =============================================================================================
--- Подтиповые таблицы. Каждая -- "расширение" object по id_object (1:1, PK одновременно и FK).
--- =============================================================================================
-
--- Дом/здание. addressing_mode: 1 = "по домам" (единый номер, наследуют все помещения/подъезды/
--- комнаты), 2 = "по подъездам" (свой номер дома у каждого house_doorway).
-CREATE TABLE ba7_data.object_house (
-    id_object        BIGINT PRIMARY KEY REFERENCES ba7_data.object (id_object),
-    id_territory     BIGINT REFERENCES ba7_data.territory (id_territory),
-    house_no         VARCHAR(10),
-    building_no      VARCHAR(30),
-    id_territory2    BIGINT REFERENCES ba7_data.territory (id_territory),
-    house_no2        VARCHAR(6),
-    building_no2     VARCHAR(30),
-    addressing_mode  INT NOT NULL CHECK (addressing_mode IN (1, 2)),
-    zip              NUMERIC(10),
-    sq_life          NUMERIC
+-- Аналог 27 OUT-параметров Oracle-процедуры GetTerritoryInfo
+-- (без типов территорий — они отбрасываются в обёртке)
+CREATE TYPE public.territory_info_type AS (
+    short_adres     TEXT,       -- адрес от улицы (до первого нас. пункта)
+    full_adres      TEXT,       -- полный адрес от корня иерархии
+    id_street       BIGINT,     -- улица (id_territory_class = 8)
+    street_name     TEXT,
+    id_city         BIGINT,     -- нас. пункт (class = 4, первый снизу)
+    city_name       TEXT,
+    id_main_city    BIGINT,     -- второй нас. пункт (для вложенных)
+    main_city_name  TEXT,
+    id_district     BIGINT,     -- внутригородской район (class = 5)
+    district_name   TEXT,
+    id_raion        BIGINT,     -- район (class = 7)
+    raion_name      TEXT,
+    id_region       BIGINT,     -- регион (class = 3)
+    region_name     TEXT,
+    adr_pos01       INTEGER,    -- позиции в full_adres (см. territory_pkg.get_info)
+    adr_pos02       INTEGER,
+    adr_pos03       INTEGER,
+    adr_pos04       INTEGER,
+    adr_pos05       INTEGER,
+    adr_pos06       INTEGER,
+    adr_pos07       INTEGER,
+    adr_pos08       INTEGER,
+    adr_pos09       INTEGER,
+    adr_pos10       INTEGER,
+    zip             NUMERIC(10)
 );
 
--- Подъезд. Существует только при addressing_mode = 2 у своего дома (номер дома -- свой, house_no).
-CREATE TABLE ba7_data.house_doorway (
-    id_object        BIGINT PRIMARY KEY REFERENCES ba7_data.object (id_object),
-    id_object_house  BIGINT NOT NULL REFERENCES ba7_data.object_house (id_object),
-    house_no         VARCHAR(10)
+
+-- ────────────────────────────────────────────────────────────
+-- 4. Базовые таблицы
+--
+-- В Oracle-архиве нет ни одного CREATE TABLE для них — только
+-- ALTER TABLE, триггеры и SELECT. Структура ниже реконструирована
+-- по фактическому использованию полей (:new./:old. в триггерах,
+-- SELECT в пакетах) — это минимально достаточный набор.
+-- В реальной системе у таблиц могут быть дополнительные поля,
+-- не участвующие в адресной логике.
+--
+-- Порядок создания важен из-за FK.
+-- ────────────────────────────────────────────────────────────
+
+-- Справочник типов территорий: даёт префикс адреса ('ул.', 'г.')
+CREATE TABLE IF NOT EXISTS territory_type (
+    id_territory_class  INTEGER NOT NULL,
+    id_territory_type   INTEGER NOT NULL,
+    name                VARCHAR(200),
+    short_name          VARCHAR(50),
+
+    CONSTRAINT pk_territory_type PRIMARY KEY (id_territory_class, id_territory_type)
 );
 
-CREATE INDEX i1_house_doorway_house ON ba7_data.house_doorway (id_object_house);
+-- Иерархия территорий (самоссылка через id_parent)
+-- Классы: 2=страна, 3=регион, 7=район, 4=нас.пункт, 5=внутригор.район, 8=улица
+CREATE TABLE IF NOT EXISTS territory (
+    id_territory        BIGINT       NOT NULL,
+    id_parent           BIGINT,
+    id_territory_class  INTEGER,
+    id_territory_type   INTEGER,
+    name                VARCHAR(500) NOT NULL,
+    zip                 NUMERIC(10),
 
--- Помещение/квартира. id_house_doorway обязателен, когда дом в режиме "по подъездам" (проверяется
--- в триггере, не в CHECK -- значение зависит от addressing_mode дома, а не от самой строки).
-CREATE TABLE ba7_data.object_flat (
-    id_object         BIGINT PRIMARY KEY REFERENCES ba7_data.object (id_object),
-    id_object_house   BIGINT NOT NULL REFERENCES ba7_data.object_house (id_object),
-    id_house_doorway  BIGINT REFERENCES ba7_data.house_doorway (id_object),
-    flat_no           VARCHAR(30),
-    sq_life           NUMERIC
+    CONSTRAINT pk_territory PRIMARY KEY (id_territory),
+    CONSTRAINT fk_territory_parent
+        FOREIGN KEY (id_parent) REFERENCES territory (id_territory),
+    CONSTRAINT fk_territory_type
+        FOREIGN KEY (id_territory_class, id_territory_type)
+        REFERENCES territory_type (id_territory_class, id_territory_type)
 );
 
-CREATE INDEX i1_object_flat_house   ON ba7_data.object_flat (id_object_house);
-CREATE INDEX i1_object_flat_doorway ON ba7_data.object_flat (id_house_doorway);
+CREATE INDEX IF NOT EXISTS i1_territory_parent ON territory (id_parent);
 
--- Комната (общежития, коммуналки) -- всегда внутри помещения, наследует адрес только от него.
-CREATE TABLE ba7_data.object_room (
-    id_object       BIGINT PRIMARY KEY REFERENCES ba7_data.object (id_object),
-    id_object_flat  BIGINT NOT NULL REFERENCES ba7_data.object_flat (id_object),
-    room_no         VARCHAR(30),
-    sq_life         NUMERIC
+-- Справочник типов объектов: даёт type_name ('квартира', 'помещение')
+-- Классы: 10 = подъезд, 11 = комната (используются в update_object_info)
+CREATE TABLE IF NOT EXISTS object_type (
+    id_object_class  INTEGER NOT NULL,
+    id_object_type   INTEGER NOT NULL,
+    name             VARCHAR(500),
+
+    CONSTRAINT pk_object_type PRIMARY KEY (id_object_class, id_object_type)
 );
 
-CREATE INDEX i1_object_room_flat ON ba7_data.object_room (id_object_flat);
-
--- Прочие объекты: гараж, сарай, подстанция и т.д. -- без подъездов/наследования, простое копирование.
-CREATE TABLE ba7_data.object_unknown (
-    id_object     BIGINT PRIMARY KEY REFERENCES ba7_data.object (id_object),
-    id_territory  BIGINT REFERENCES ba7_data.territory (id_territory),
-    house_no      VARCHAR(10),
-    zip           NUMERIC(10)
-);
-
--- =============================================================================================
--- Составной тип-заменитель OBJECT%ROWTYPE.
--- В Oracle-пакете object_info_pkg параметр update_object_info(p$object OBJECT%ROWTYPE, ...)
--- получал автоматически весь набор колонок OBJECT. В PostgreSQL такого автоматизма нет, поэтому
--- явный тип с тем же перечнем полей, что реально нужен апдейту object_info_tbl -- один в один
--- список l$object_required_column_list из Oracle-пакета (+ id_object).
--- =============================================================================================
-
-CREATE TYPE object_info_pkg.object_row_type AS (
-    id_object            BIGINT,
+-- Основная таблица объектов недвижимости
+-- Поля = l$object_required_column_list + id_object
+CREATE TABLE IF NOT EXISTS object (
+    id_object            BIGINT          NOT NULL,
     id_territory         BIGINT,
     dom                  VARCHAR(10),
     building_no          VARCHAR(30),
@@ -171,100 +176,215 @@ CREATE TYPE object_info_pkg.object_row_type AS (
     id_territory2        BIGINT,
     dom2                 VARCHAR(6),
     building_no2         VARCHAR(30),
-    id_object_class      INT,
-    id_object_type       INT,
+    id_object_class      INTEGER,
+    id_object_type       INTEGER,
     sq_all               NUMERIC(10,2),
+    sq_life              NUMERIC,
+    volume               NUMERIC,
     object_name          VARCHAR(50),
+    room_no              VARCHAR(30),
     id_entity_instance   BIGINT,
     trace_info           VARCHAR(2000),
-    addressing_mode      INT,
+    addressing_mode      INTEGER,
     id_object_house      BIGINT,
     id_house_doorway     BIGINT,
     zip                  NUMERIC(10),
     object_no            BIGINT,
-    volume               NUMERIC,
-    sq_life              NUMERIC,
-    room_no              VARCHAR(30)
+
+    CONSTRAINT pk_object PRIMARY KEY (id_object),
+    CONSTRAINT fk_object_territory
+        FOREIGN KEY (id_territory)  REFERENCES territory (id_territory),
+    CONSTRAINT fk_object_territory2
+        FOREIGN KEY (id_territory2) REFERENCES territory (id_territory),
+    CONSTRAINT fk_object_type
+        FOREIGN KEY (id_object_class, id_object_type)
+        REFERENCES object_type (id_object_class, id_object_type)
 );
 
--- =============================================================================================
--- Отчётная (денормализованная) таблица адресов -- аналог object_info_tbl.
--- =============================================================================================
+-- Подкласс "дом"
+CREATE TABLE IF NOT EXISTS object_house (
+    id_object         BIGINT       NOT NULL,
+    id_territory      BIGINT,
+    house_no          VARCHAR(10),
+    building_no       VARCHAR(30),
+    id_territory2     BIGINT,
+    house_no2         VARCHAR(6),
+    building_no2      VARCHAR(30),
+    addressing_mode   INTEGER      NOT NULL DEFAULT 1,
+    zip               NUMERIC(10),
+    sq_life           NUMERIC,
 
-CREATE TABLE ba7_data.object_info_tbl (
-    id_object                 BIGINT PRIMARY KEY,
-    id_territory               BIGINT,
-    id_street                  BIGINT,
-    house                      VARCHAR(10),
-    building_no                VARCHAR(30),
-    flat                       VARCHAR(30),
-    id_object_class            INT,
-    id_object_type             INT,
-    sq_all                     NUMERIC(10,2),
-    adres                      VARCHAR(100),
-    full_adres                 VARCHAR(1000),
-    street_name                VARCHAR(200),
-    object_name                VARCHAR(50),
-    city_name                  VARCHAR(200),
-    id_raion                   BIGINT,
-    raion_name                 VARCHAR(200),
-    id_city                    BIGINT,
-    id_entity_instance         BIGINT,
-    type_name                  VARCHAR(500),
-    trace_info                 VARCHAR(2000),
-    adr_pos01 INT, adr_pos02 INT, adr_pos03 INT, adr_pos04 INT, adr_pos05 INT,
-    adr_pos06 INT, adr_pos07 INT, adr_pos08 INT, adr_pos09 INT, adr_pos10 INT,
-    -- альтернативный адрес (угловые дома с двумя официальными адресами)
-    id_territory2               BIGINT,
-    id_street2                  BIGINT,
-    street_name2                VARCHAR(200),
-    house2                      VARCHAR(6),
-    building_no2                VARCHAR(30),
-    adres2                      VARCHAR(100),
-    full_adres2                 VARCHAR(1000),
-    id_city2                    BIGINT,
-    city_name2                  VARCHAR(200),
-    id_raion2                   BIGINT,
-    raion_name2                 VARCHAR(200),
-    is_exist_alternate_adres    INT DEFAULT 0,
-    addressing_mode             INT,
-    id_house_doorway            BIGINT,
-    id_object_house             BIGINT,
-    id_region                   BIGINT,
-    region_name                 VARCHAR(200),
-    id_main_city                BIGINT,
-    main_city_name              VARCHAR(200),
-    id_district                 BIGINT,
-    district_name               VARCHAR(200),
-    object_no                   BIGINT,
-    volume                      NUMERIC,
-    sq_life                     NUMERIC,
-    room_no                     VARCHAR(30),
-    zip                         NUMERIC(10)
+    -- MERGE-фикс (из моего варианта): раньше addressing_mode принимал любое
+    -- целое, и невалидное значение отлавливалось только в ELSE-ветке триггера
+    -- (уже после того как оно записано в таблицу). CHECK не даёт кривым данным
+    -- вообще попасть в object_house.
+    CONSTRAINT ck_object_house_addr_mode CHECK (addressing_mode IN (1, 2)),
+    CONSTRAINT pk_object_house PRIMARY KEY (id_object),
+    CONSTRAINT fk_object_house_object
+        FOREIGN KEY (id_object)    REFERENCES object (id_object),
+    CONSTRAINT fk_object_house_territory
+        FOREIGN KEY (id_territory) REFERENCES territory (id_territory),
+    CONSTRAINT fk_object_house_territory2
+        FOREIGN KEY (id_territory2) REFERENCES territory (id_territory)
 );
 
--- Поисковый индекс по street/house/flat -- аналог I1_OBJECT_INFO_TBL из Oracle. Там он был "UNIQUE",
--- но реальную уникальность обеспечивает id_object, входящий в состав индекса, а не сама комбинация
--- street/house/flat -- поэтому здесь обычный (не уникальный) индекс с тем же назначением.
-CREATE INDEX i1_object_info_tbl ON ba7_data.object_info_tbl
-    (id_street, UPPER(TRIM(house)), UPPER(TRIM(flat)), id_object);
+-- Подкласс "подъезд"
+CREATE TABLE IF NOT EXISTS house_doorway (
+    id_object         BIGINT      NOT NULL,
+    id_object_house   BIGINT      NOT NULL,
+    house_no          VARCHAR(6),     -- заполняется только при addressing_mode = 2
 
--- =============================================================================================
--- Представление object_info -- аналог VIEW из object_info_pkg.create_view.
--- =============================================================================================
+    CONSTRAINT pk_house_doorway PRIMARY KEY (id_object),
+    CONSTRAINT fk_house_doorway_object
+        FOREIGN KEY (id_object)       REFERENCES object (id_object),
+    CONSTRAINT fk_house_doorway_house
+        FOREIGN KEY (id_object_house) REFERENCES object_house (id_object)
+);
 
-CREATE OR REPLACE VIEW ba7_data.object_info AS
-SELECT a.*,
-       UPPER(COALESCE(a.street_name, ' '))       AS find_street_name,
-       UPPER(COALESCE(a.city_name, ' '))         AS find_city_name,
-       UPPER(COALESCE(TRIM(a.house), ' '))       AS find_house,
-       UPPER(COALESCE(TRIM(a.building_no), ' ')) AS find_building_no,
-       UPPER(COALESCE(TRIM(a.flat), ' '))        AS find_flat
-FROM ba7_data.object_info_tbl a;
+CREATE INDEX IF NOT EXISTS i1_house_doorway_house ON house_doorway (id_object_house);
 
--- TODO: аналог scheming_pkg.group_synonym/group_privs -- в Oracle-оригинале это регистрация
--- синонимов и выдача прав на схемы-потребители (TEST_OWNER, STD_POLICY). PostgreSQL-эквивалента
--- scheming_pkg ещё нет, поэтому ниже -- заглушка, которую нужно раскомментировать и адаптировать
--- под реальные роли, когда появится PG-аналог этого фреймворкового пакета.
--- GRANT USAGE ON SCHEMA ba7_data TO test_owner_role, std_policy_role;
--- GRANT SELECT ON ba7_data.object_info TO test_owner_role, std_policy_role;
+-- Подкласс "помещение" (квартира / нежилое)
+CREATE TABLE IF NOT EXISTS object_flat (
+    id_object          BIGINT       NOT NULL,
+    id_object_house    BIGINT       NOT NULL,
+    id_house_doorway   BIGINT,          -- обязателен при addressing_mode = 2
+    flat_no            VARCHAR(30),
+    sq_life            NUMERIC,
+
+    CONSTRAINT pk_object_flat PRIMARY KEY (id_object),
+    CONSTRAINT fk_object_flat_object
+        FOREIGN KEY (id_object)        REFERENCES object (id_object),
+    CONSTRAINT fk_object_flat_house
+        FOREIGN KEY (id_object_house)  REFERENCES object_house (id_object),
+    CONSTRAINT fk_object_flat_doorway
+        FOREIGN KEY (id_house_doorway) REFERENCES house_doorway (id_object)
+);
+
+CREATE INDEX IF NOT EXISTS i1_object_flat_house   ON object_flat (id_object_house);
+CREATE INDEX IF NOT EXISTS i2_object_flat_doorway ON object_flat (id_house_doorway);
+
+-- Подкласс "комната" (внутри помещения; появился в версии 10, 28.03.2022)
+CREATE TABLE IF NOT EXISTS object_room (
+    id_object        BIGINT       NOT NULL,
+    id_object_flat   BIGINT       NOT NULL,
+    room_no          VARCHAR(30),
+    sq_life          NUMERIC,
+
+    CONSTRAINT pk_object_room PRIMARY KEY (id_object),
+    CONSTRAINT fk_object_room_object
+        FOREIGN KEY (id_object)      REFERENCES object (id_object),
+    CONSTRAINT fk_object_room_flat
+        FOREIGN KEY (id_object_flat) REFERENCES object_flat (id_object)
+);
+
+CREATE INDEX IF NOT EXISTS i1_object_room_flat ON object_room (id_object_flat);
+
+-- Подкласс "прочий объект"
+CREATE TABLE IF NOT EXISTS object_unknown (
+    id_object      BIGINT       NOT NULL,
+    id_territory   BIGINT,
+    house_no       VARCHAR(10),
+    zip            NUMERIC(10),
+
+    CONSTRAINT pk_object_unknown PRIMARY KEY (id_object),
+    CONSTRAINT fk_object_unknown_object
+        FOREIGN KEY (id_object)    REFERENCES object (id_object),
+    CONSTRAINT fk_object_unknown_territory
+        FOREIGN KEY (id_territory) REFERENCES territory (id_territory)
+);
+
+
+-- ────────────────────────────────────────────────────────────
+-- 5. object_info_tbl — денормализованный кэш адресов
+-- Структура реконструирована по истории ALTER TABLE
+-- (00_update_object_info_tbl.sql) и INSERT/UPDATE в пакете.
+-- Не редактировать напрямую — только через процедуры пакета.
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS object_info_tbl (
+    id_object               BIGINT          NOT NULL,
+    id_territory            BIGINT,
+    id_street               BIGINT,
+    house                   VARCHAR(10),    -- основной дом до 10 символов
+    building_no             VARCHAR(30),
+    flat                    VARCHAR(30),    -- Oracle: MODIFY(FLAT VARCHAR2(30))
+    id_object_class         INTEGER,
+    id_object_type          INTEGER,
+    sq_all                  NUMERIC(10,2),
+    adres                   VARCHAR(100),   -- краткий адрес; Oracle ADRES2 VARCHAR2(100), по симметрии
+    full_adres              VARCHAR(1000),
+    street_name             VARCHAR(200),
+    object_name             VARCHAR(50),
+    city_name               VARCHAR(200),
+    id_raion                BIGINT,
+    raion_name              VARCHAR(200),
+    id_city                 BIGINT,
+    id_entity_instance      BIGINT,
+    type_name               VARCHAR(500),
+    trace_info              VARCHAR(2000),
+    -- Позиция в full_adres, с которой начинается адрес
+    -- соответствующего уровня. Пример: SUBSTR(full_adres, adr_pos04)
+    -- = адрес начиная с населённого пункта.
+    adr_pos01               INTEGER,
+    adr_pos02               INTEGER,
+    adr_pos03               INTEGER,
+    adr_pos04               INTEGER,
+    adr_pos05               INTEGER,
+    adr_pos06               INTEGER,
+    adr_pos07               INTEGER,
+    adr_pos08               INTEGER,
+    adr_pos09               INTEGER,
+    adr_pos10               INTEGER,
+    -- Альтернативный адрес (добавлен 15.05.2013)
+    id_territory2           BIGINT,
+    id_street2              BIGINT,
+    street_name2            VARCHAR(200),
+    house2                  VARCHAR(6),     -- Oracle: HOUSE2 CHAR(6)
+    building_no2            VARCHAR(30),    -- Oracle: BUILDING_NO2 VARCHAR2(30)
+    adres2                  VARCHAR(100),   -- Oracle: ADRES2 VARCHAR2(100)
+    full_adres2             VARCHAR(1000),  -- Oracle: FULL_ADRES2 VARCHAR2(1000)
+    id_city2                BIGINT,
+    city_name2              VARCHAR(200),
+    id_raion2               BIGINT,
+    raion_name2             VARCHAR(200),
+    is_exist_alternate_adres INTEGER        DEFAULT 0,
+    addressing_mode         INTEGER,
+    id_house_doorway        BIGINT,
+    id_object_house         BIGINT,         -- добавлено 11.07.2016
+    -- Поля для сопоставления с ФИАС (добавлены 20.11.2015)
+    id_region               BIGINT,
+    region_name             VARCHAR(200),
+    id_main_city            BIGINT,
+    main_city_name          VARCHAR(200),
+    id_district             BIGINT,
+    district_name           VARCHAR(200),
+    object_no               BIGINT,
+    volume                  NUMERIC,
+    sq_life                 NUMERIC,
+    room_no                 VARCHAR(30),    -- добавлено 28.03.2022
+    zip                     NUMERIC(10),
+
+    CONSTRAINT pk_object_info_tbl PRIMARY KEY (id_object)
+);
+
+COMMENT ON TABLE object_info_tbl IS
+'Денормализованный кэш адресов объектов недвижимости.
+Заполняется и обновляется автоматически через триггеры.
+Не редактировать напрямую — только через процедуры object_info_pkg.';
+
+
+-- ────────────────────────────────────────────────────────────
+-- 6. Индексы
+-- ────────────────────────────────────────────────────────────
+
+-- Oracle: CREATE UNIQUE INDEX I1_OBJECT_INFO_TBL ON object_info_tbl
+--         (ID_STREET, UPPER(TRIM(HOUSE)), UPPER(TRIM(FLAT)), ID_OBJECT)
+CREATE UNIQUE INDEX IF NOT EXISTS i1_object_info_tbl
+    ON object_info_tbl (id_street, UPPER(TRIM(house)), UPPER(TRIM(flat)), id_object);
+
+CREATE INDEX IF NOT EXISTS i2_object_info_tbl_territory ON object_info_tbl (id_territory);
+CREATE INDEX IF NOT EXISTS i3_object_info_tbl_city      ON object_info_tbl (id_city);
+
+-- Oracle: CREATE UNIQUE INDEX I1_OBJECT ON OBJECT
+--         (ID_TERRITORY, UPPER(TRIM(DOM)), UPPER(TRIM(KW)), ID_OBJECT)
+CREATE UNIQUE INDEX IF NOT EXISTS i1_object
+    ON object (id_territory, UPPER(TRIM(dom)), UPPER(TRIM(kw)), id_object);
