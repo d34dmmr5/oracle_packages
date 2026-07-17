@@ -67,27 +67,40 @@ BEGIN
     WHERE id_object_class = p_object.id_object_class AND id_object_type = p_object.id_object_type;
 
     -- === Основной адрес ==========================================================================
+    -- ВАЖНО про NULL: в Oracle оператор || трактует NULL как пустую строку ('a'||NULL='a'), поэтому
+    -- отсутствие одного поля (например, дом без номера -- реальная ситуация при вводе данных
+    -- человеком) там только "укорачивает" итоговый адрес. В PostgreSQL || стандартно "заражает"
+    -- NULL-ом всю строку (NULL||'a'=NULL) -- без COALESCE ниже единственное пустое поле обнулило бы
+    -- уже корректно собранный t.short_adres/t.full_adres целиком, а не только свой фрагмент.
     IF p_object.id_territory IS NOT NULL THEN
         t := territory_pkg.get_info(p_object.id_territory);
-        m_adres := t.short_adres;
-        m_full_adres := t.full_adres;
+        IF t.full_adres IS NULL THEN
+            -- id_territory указывает на несуществующую строку territory -- при включённом FK
+            -- (00_ddl.sql) такое невозможно через саму БД, но реально при массовой загрузке данных
+            -- с временно отключёнными проверками (типичный сценарий переноса из Oracle). Не роняем
+            -- расчёт -- ниже всё равно соберём то, что знаем о самом объекте (номер дома и т.д.).
+            RAISE WARNING 'update_object_info: объект % ссылается на несуществующую территорию (id_territory=%)',
+                p_object.id_object, p_object.id_territory;
+        END IF;
+        m_adres := COALESCE(t.short_adres, '');
+        m_full_adres := COALESCE(t.full_adres, '');
 
-        m_object_address := 'д.' || TRIM(p_object.dom);
+        m_object_address := 'д.' || COALESCE(TRIM(p_object.dom), '');
         IF p_object.building_no IS NOT NULL THEN
             m_object_address := m_object_address || ' корп. ' || TRIM(p_object.building_no);
         END IF;
 
         IF p_object.id_object_class = 10 THEN                        -- подъезд
-            m_object_address := m_object_address || ' подъезд ' || TRIM(p_object.object_no::TEXT);
+            m_object_address := m_object_address || ' подъезд ' || COALESCE(TRIM(p_object.object_no::TEXT), '');
         END IF;
 
         IF p_object.kw IS NOT NULL THEN
             IF p_object.id_object_class = 11 THEN                    -- комната
                 -- Для комнат добавляем номер квартиры и затем логический номер комнаты
                 m_object_address := m_object_address || ' кв. ' || TRIM(p_object.kw)
-                    || ' ' || m_type_name || ' ' || TRIM(p_object.room_no);
+                    || ' ' || COALESCE(m_type_name, '') || ' ' || COALESCE(TRIM(p_object.room_no), '');
             ELSE
-                m_object_address := m_object_address || ' ' || m_type_name || ' ' || TRIM(p_object.kw);
+                m_object_address := m_object_address || ' ' || COALESCE(m_type_name, '') || ' ' || TRIM(p_object.kw);
             END IF;
         END IF;
 
@@ -98,25 +111,29 @@ BEGIN
     -- === Альтернативный адрес (угловые дома с двумя официальными адресами) ======================
     IF p_object.id_territory2 IS NOT NULL THEN
         t2 := territory_pkg.get_info(p_object.id_territory2);
-        m_adres2 := t2.short_adres;
-        m_full_adres2 := t2.full_adres;
+        IF t2.full_adres IS NULL THEN
+            RAISE WARNING 'update_object_info: объект % ссылается на несуществующую альтернативную территорию (id_territory2=%)',
+                p_object.id_object, p_object.id_territory2;
+        END IF;
+        m_adres2 := COALESCE(t2.short_adres, '');
+        m_full_adres2 := COALESCE(t2.full_adres, '');
 
-        m_object_address := 'д.' || TRIM(p_object.dom2);
+        m_object_address := 'д.' || COALESCE(TRIM(p_object.dom2), '');
         IF p_object.building_no2 IS NOT NULL THEN
             m_object_address := m_object_address || ' корп. ' || TRIM(p_object.building_no2);
         END IF;
 
         -- Логика для подъездов/комнат/помещений та же, что и для основного адреса
         IF p_object.id_object_class = 10 THEN
-            m_object_address := m_object_address || ' подъезд ' || TRIM(p_object.object_no::TEXT);
+            m_object_address := m_object_address || ' подъезд ' || COALESCE(TRIM(p_object.object_no::TEXT), '');
         END IF;
 
         IF p_object.kw IS NOT NULL THEN
             IF p_object.id_object_class = 11 THEN
                 m_object_address := m_object_address || ' кв. ' || TRIM(p_object.kw)
-                    || ' ' || m_type_name || ' ' || TRIM(p_object.room_no);
+                    || ' ' || COALESCE(m_type_name, '') || ' ' || COALESCE(TRIM(p_object.room_no), '');
             ELSE
-                m_object_address := m_object_address || ' ' || m_type_name || ' ' || TRIM(p_object.kw);
+                m_object_address := m_object_address || ' ' || COALESCE(m_type_name, '') || ' ' || TRIM(p_object.kw);
             END IF;
         END IF;
 

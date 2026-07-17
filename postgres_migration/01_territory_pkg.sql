@@ -81,18 +81,26 @@ DECLARE
     m_pos                INT[] := ARRAY[NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL]::INT[];
 BEGIN
     FOR m_ter IN
+        -- Защита от цикла в иерархии (id_parent по цепочке ссылается сам на себя -- ошибка ввода
+        -- данных, а не что-то теоретическое: Oracle CONNECT BY сам ловит такое как ORA-01436,
+        -- у WITH RECURSIVE такой защиты нет по умолчанию -- без неё это самый настоящий
+        -- бесконечный цикл, а не "медленный запрос". visited -- накопленный путь; как только
+        -- встречаем уже пройденный id_territory, останавливаем ветку. level_row < 100 -- запасной
+        -- предохранитель на случай аномально длинной (но не обязательно цикличной) цепочки.
         WITH RECURSIVE terr AS (
             SELECT b.id_territory, b.name, b.id_territory_class, b.id_territory_type, b.zip,
-                   b.id_parent, 1 AS level_row
+                   b.id_parent, 1 AS level_row, ARRAY[b.id_territory] AS visited
             FROM ba7_data.territory b
             WHERE b.id_territory = p_id_territory
             UNION ALL
             SELECT b.id_territory, b.name, b.id_territory_class, b.id_territory_type, b.zip,
-                   b.id_parent, t.level_row + 1
+                   b.id_parent, t.level_row + 1, t.visited || b.id_territory
             FROM ba7_data.territory b
             JOIN terr t ON b.id_territory = t.id_parent
+            WHERE NOT (b.id_territory = ANY (t.visited))
+              AND t.level_row < 100
         )
-        SELECT t.id_territory, t.name, t.id_territory_class, t.zip, t.level_row,
+        SELECT t.id_territory, t.name, t.id_territory_class, t.zip, t.level_row, t.id_parent,
                -- Префикс из краткого названия типа территории ("ул.", "г.", ...), с точкой на конце,
                -- если это не аббревиатура через дефис и точки там ещё нет.
                CASE WHEN tt.short_name IS NOT NULL
@@ -164,6 +172,15 @@ BEGIN
             r.zip := m_ter.zip;
         END IF;
     END LOOP;
+
+    -- Если последняя пройденная территория всё ещё имеет id_parent (т.е. подъём по иерархии
+    -- прервался не потому, что дошли до корня) -- значит сработала защита от цикла или предохранитель
+    -- по глубине. Не роняем расчёт (адрес по факту уже собран до места обрыва), но громко
+    -- предупреждаем -- это явный сигнал, что в territory испорченные данные, требующие починки.
+    IF m_ter.id_parent IS NOT NULL THEN
+        RAISE WARNING 'territory_pkg.get_info(%): обрыв обхода иерархии на территории % -- похоже на цикл (id_parent -> ... -> сам на себя) или аномально длинную цепочку (>100 уровней). Адрес собран частично.',
+            p_id_territory, m_ter.id_territory;
+    END IF;
 
     r.adr_pos01 := COALESCE(m_pos[1], 0);
     r.adr_pos02 := COALESCE(m_pos[2], 0);
